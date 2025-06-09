@@ -1,107 +1,69 @@
-<#  ROG Ally Sleep Doctor  –  v1.0
-    • Live status (Modern Standby / Hibernate / wake devices / last wake)
-    • Arrow-key menu  (↑ ↓ Enter)
-    • Fixes:  ▸Disable Modern Standby ▸Enable Hibernate
-              ▸Set Power-button → Hibernate ▸Disable wake devices
-    • Auto-elevate when called via “iwr | iex”
-#>
+<#  ROG Ally Sleep Doctor 1.1  –  no fancy chars  #>
 
-#region Helpers
-function Color($txt,$c){Write-Host $txt -ForegroundColor $c}
-function Is-Admin {
-    (New-Object Security.Principal.WindowsPrincipal `
-      ([Security.Principal.WindowsIdentity]::GetCurrent()) `
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not ([Security.Principal.WindowsPrincipal]
+          [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+          [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    exit
 }
-function Ensure-Admin {
-    if(-not (Is-Admin)) {
-        Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-        exit
-    }
-}
-Ensure-Admin
 Set-ExecutionPolicy Bypass -Scope Process -Force
-#endregion
 
-#region Status getters
-function Modern-On { $k = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' `
-                           -Name PlatformAoAcOverride -EA SilentlyContinue
-                    if(!$k){return $true}; return ($k.PlatformAoAcOverride -ne 0) }
-function Hib-On    { (powercfg /a | Select-String 'Hibernate') -like '*available*' }
-function Wake-List { powercfg -devicequery wake_armed }
-function LastWake  { try{(powercfg /lastwake) -join ' '}catch{'N/A'} }
-#endregion
+function C([string]$t,[string]$c){Write-Host $t -ForegroundColor $c}
 
-#region Fix actions
-function Disable-Modern { Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' `
-                           PlatformAoAcOverride 0 -Type DWord -Force
-                           Color 'Modern Standby disabled  (S3 sleep enabled).' Green }
-function Enable-Hib     { powercfg /hibernate on | Out-Null; Color 'Hibernate enabled.' Green }
-function Set-PowerBtn   { powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3
-                          powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3
-                          powercfg -setactive SCHEME_CURRENT
-                          Color 'Power button now triggers Hibernate.' Green }
-function Disable-WakeInt{
-    $d=Wake-List; if(!$d){Color 'No wake devices.' Green; return}
-    $i=1; $map=@{}; foreach($dev in $d){Color "[$i] $dev" Yellow; $map[$i]=$dev; $i++}
-    $ch=Read-Host 'Select number or * for all'; if($ch -eq '*'){
-        foreach($dev in $d){powercfg -devicedisablewake "$dev"}; Color 'All wake devices disabled.' Green
-    } elseif([int]::TryParse($ch,[ref]$n) -and $map[$n]) {
-        powercfg -devicedisablewake "$($map[$n])"; Color "$($map[$n]) disabled." Green
-    }
-}
-#endregion
+function GetModern { $k=Get-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\Power -Name PlatformAoAcOverride -EA SilentlyContinue; if(!$k){$true}else{($k.PlatformAoAcOverride -ne 0)} }
+function GetHibernate { (powercfg /a | Select-String Hibernate) -like '*available*' }
+function GetWake { powercfg -devicequery wake_armed }
+function GetLastWake { try{(powercfg /lastwake)-join' '}catch{'N/A'} }
 
-function Show-Status {
-    $ms=Modern-On; $hib=Hib-On; $w=Wake-List; $lw=LastWake
-    Color "`n====  CURRENT STATUS  ====" Cyan
-    Color ("Modern Standby: "+($ms?'ENABLED':'DISABLED')) ($ms?'Red':'Green')
-    Color ("Hibernate    : "+($hib?'ENABLED':'DISABLED')) ($hib?'Green':'Red')
-    Color ("Wake devices : $($w.Count)") ($w.Count?'Yellow':'Green')
-    Color ("Last wake    : $lw") Gray
-    Color "`nRecommendations:" Magenta
-    if($ms){Color ' • Disable Modern Standby (will enable S3).' Yellow}
-    if(-not $hib){Color ' • Enable Hibernate.' Yellow}
-    if($w.Count){Color ' • Disable wake devices.' Yellow}
-    Color '============================' Cyan
+function ShowStatus {
+    $ms=GetModern; $hb=GetHibernate; $wk=GetWake; $lw=GetLastWake
+    C "`n=== STATUS ===" Cyan
+    C ("Modern Standby: "+($ms?'ON':'OFF')) ($ms?'Red':'Green')
+    C ("Hibernate     : "+($hb?'ON':'OFF'))  ($hb?'Green':'Red')
+    C ("Wake devices  : $($wk.Count)") ($wk.Count?'Yellow':'Green')
+    C ("Last wake     : $lw") Gray
+    C "===============`n" Cyan
 }
 
-function Draw-Menu([int]$sel){
-    Clear-Host; Show-Status
-    Color "`nUse ↑ ↓ arrows  |  Enter = run`n" DarkGray
-    $menu = @(
-      'Show status',
-      'Disable Modern Standby',
-      'Enable Hibernate',
-      'Set Power-button → Hibernate',
-      'Disable wake devices',
-      'EXIT'
-    )
-    for($i=0;$i -lt $menu.Count;$i++){
-        if($i -eq $sel){
-            Write-Host "> $($menu[$i])" -ForegroundColor Black -BackgroundColor Yellow
-        }else{
-            Write-Host "  $($menu[$i])"
-        }
-    }
+function DisableModern { Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\Power PlatformAoAcOverride 0 -Type DWord -Force; C 'Modern Standby OFF. Reboot later.' Green }
+function EnableHibernate { powercfg /hibernate on | out-null; C 'Hibernate ON.' Green }
+function SetPowerBtn { powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setactive SCHEME_CURRENT; C 'Power button -> hibernate.' Green }
+function DisableWakeInteractive {
+ $d=GetWake; if(!$d){C 'no wake devices' Green;return}
+ $i=1;$map=@{};foreach($v in $d){C "[$i] $v" Yellow;$map[$i]=$v;$i++}
+ $c=Read-Host 'Pick number or * for all'; if($c -eq '*'){foreach($v in $d){powercfg -devicedisablewake "$v"};C 'all disabled' Green}
+ elseif([int]::TryParse($c,[ref]$n) -and $map[$n]){powercfg -devicedisablewake "$($map[$n])";C 'disabled.' Green}
 }
 
-# main loop
+$menu=@(
+ 'Show status',
+ 'Disable Modern Standby',
+ 'Enable Hibernate',
+ 'Set Power button → Hibernate',
+ 'Disable wake devices',
+ 'EXIT'
+)
 $idx=0
 while($true){
-    Draw-Menu $idx
-    switch((Read-Key).Key){
-        'UpArrow'   { if($idx) { $idx-- } }
-        'DownArrow' { if($idx -lt 5) { $idx++ } }
-        'Enter' {
-            switch($idx){
-              0 { Show-Status; Pause }
-              1 { Disable-Modern; Pause }
-              2 { Enable-Hib;     Pause }
-              3 { Set-PowerBtn;   Pause }
-              4 { Disable-WakeInt;Pause }
-              5 { break }
-            }
-        }
-    }
+ Clear-Host; ShowStatus
+ C "Use UP/DOWN and Enter`n" DarkGray
+ for($j=0;$j -lt $menu.Count;$j++){
+   if($j -eq $idx){Write-Host "> $($menu[$j])" -BackgroundColor Yellow -ForegroundColor Black}
+   else{Write-Host "  $($menu[$j])"}
+ }
+ $k=[console]::ReadKey($true)
+ switch($k.Key){
+   'UpArrow' {$idx=[Math]::Max(0,$idx-1)}
+   'DownArrow'{$idx=[Math]::Min($menu.Count-1,$idx+1)}
+   'Enter' {
+      switch($idx){
+        0{ShowStatus;Pause}
+        1{DisableModern;Pause}
+        2{EnableHibernate;Pause}
+        3{SetPowerBtn;Pause}
+        4{DisableWakeInteractive;Pause}
+        5{break}
+      }
+   }
+ }
 }
