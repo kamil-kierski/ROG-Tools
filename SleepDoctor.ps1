@@ -47,166 +47,127 @@ function Invoke-PoshCommand {
 }
 
 ### ----- fix actions -----
-function DisableModern { if(Invoke-PoshCommand {powercfg -change -standby-timeout-ac 0; powercfg -change -standby-timeout-dc 0}) { Log 'Modern Standby disabled (timeouts set to 0)'; Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' PlatformAoAcOverride 0 -Type DWord -Force; Log 'Modern Standby disabled (registry)' } }
-function EnableHib     { if(Invoke-PoshCommand {powercfg /hibernate on}) { Log 'Hibernate enabled' } }
-function SetPowerBtn   { if(Invoke-PoshCommand {powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setactive SCHEME_CURRENT}) { Log 'Power-button -> Hibernate' } }
-
-### ----- drawing helpers (minimal flicker) -----
-$H = [Console]::WindowHeight
-$W = [Console]::WindowWidth
-function ClearZone([int]$yStart,[int]$yEnd){
-    for($y=$yStart;$y -le $yEnd;$y++){
-        [Console]::SetCursorPosition(0,$y)
-        Write-Host (" " * ($W-1))
+function DisableModern { Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' PlatformAoAcOverride 0 -Type DWord -Force; Log 'Modern Standby disabled'; return $true }
+function EnableHib     { try { powercfg /hibernate on | Out-Null; Log 'Hibernate enabled'; return $true } catch { Log "ERROR: $($_.Exception.Message)"; return $false } }
+function SetPowerBtn   { try { powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setactive SCHEME_CURRENT | Out-Null; Log 'Power-button -> Hibernate'; return $true } catch { Log "ERROR: $($_.Exception.Message)"; return $false } }
+function Toggle-WakeDevice([string]$dev, [bool]$isArmed){
+    $action = if($isArmed){"disable"}else{"enable"}
+    try {
+        powercfg -device${action}wake "$dev" | Out-Null
+        Log "Device wake ${action}d: $dev"
+    } catch {
+        Log "ERROR: $($_.Exception.Message)"
     }
 }
 
-function DrawStatus{
-    [Console]::SetCursorPosition(0,0)
-    ClearZone 0 9
-    $ms = ModernOn; $hib = HibOn; $w = WakeList; $lw = LastWake
-    C "====  CURRENT STATUS  ====" Cyan; NewLine
-    C "Modern Standby: "; C $(if($ms){'ENABLED'}else{'DISABLED'}) $(if($ms){'Red'}else{'Green'}); NewLine
-    C "Hibernate      : "; C $(if($hib){'ENABLED'}else{'DISABLED'}) $(if($hib){'Green'}else{'Red'}); NewLine
-    C "Wake devices   : $($w.Count)" $(if($w.Count){'Yellow'}else{'Green'}); NewLine
-    C "Last wake      : $lw" Gray; NewLine
-
-    C "Recommendations:" Magenta; NewLine
-    if($ms){  C " • Disable Modern Standby." Yellow; NewLine }
-    if(-not $hib){ C " • Enable Hibernate." Yellow; NewLine }
-    if($w.Count){  C " • Disable wake devices." Yellow; NewLine }
+### ----- New Simplified UI Engine -----
+$global:Status = @{}
+function Update-Status{
+    $global:Status.ModernOn = ModernOn
+    $global:Status.HibOn = HibOn
+    $global:Status.WakeList = WakeList
+    $global:Status.LastWake = LastWake
+    Log "Status updated"
 }
 
-function DrawMenu([int]$sel, [string[]]$menu){
-    $menuTop = 10
-    $menuBottom = $menuTop + $menu.Count
-    [Console]::SetCursorPosition(0, $menuTop)
-    ClearZone $menuTop $menuBottom
-    [Console]::SetCursorPosition(0, $menuTop)
+function Draw-Screen([int]$sel, [string[]]$menu){
+    Clear-Host
+    $H = [Console]::WindowHeight
+    $W = [Console]::WindowWidth
 
+    # --- STATUS ---
+    C "====  CURRENT STATUS  ====" Cyan; NewLine
+    C "Modern Standby: "; C $(if($global:Status.ModernOn){'ENABLED'}else{'DISABLED'}) $(if($global:Status.ModernOn){'Red'}else{'Green'}); NewLine
+    C "Hibernate      : "; C $(if($global:Status.HibOn){'ENABLED'}else{'DISABLED'}) $(if($global:Status.HibOn){'Green'}else{'Red'}); NewLine
+    C "Wake devices   : $($global:Status.WakeList.Count)" $(if($global:Status.WakeList.Count){'Yellow'}else{'Green'}); NewLine
+    C "Last wake      : $($global:Status.LastWake)" Gray; NewLine
+    NewLine
+    C "Recommendations:" Magenta; NewLine
+    if($global:Status.ModernOn){ C " • Disable Modern Standby." Yellow; NewLine }
+    if(-not $global:Status.HibOn){ C " • Enable Hibernate." Yellow; NewLine }
+    if($global:Status.WakeList.Count){  C " • Disable wake devices." Yellow; NewLine }
+    NewLine
+
+    # --- MENU ---
     C "Use ↑↓, A/Enter=select, B/Esc=back/exit" DarkGray; NewLine
     for($i=0;$i -lt $menu.Count;$i++){
-        if($i -eq $sel){
-            Write-Host ("> $($menu[$i])".PadRight($W-1)) -ForegroundColor Black -BackgroundColor Yellow
-        } else {
-            Write-Host ("  $($menu[$i])".PadRight($W-1))
-        }
+        if($i -eq $sel){ Write-Host ("> $($menu[$i])".PadRight($W-1)) -ForegroundColor Black -BackgroundColor Yellow }
+        else { Write-Host ("  $($menu[$i])".PadRight($W-1)) }
     }
+    
+    # --- LOG ---
+    $logStartY = if($H - 8 -lt 20){20}else{$H - 8}
+    [Console]::SetCursorPosition(0, $logStartY)
+    C "====  DEBUG LOG  ====" DarkGray; NewLine
+    foreach($l in $global:LOG){ Write-Host $l }
 }
 
-function DrawLog{
-    $start = $H-7
-    ClearZone $start ($H-2)
-    [Console]::SetCursorPosition(0,$start)
-    C "Debug log (last 5):" DarkGray; NewLine
-    foreach($l in $LOG){ Write-Host $l }
-}
-
-### ----- wake-device manager (arrow list) -----
-function WakeMenu{
-    $list = powercfg -devicequery wake_programmable
-    if(-not $list){ Log 'No wake-programmable devices.'; return }
+function Manage-WakeDevices{
+    $allDevices = powercfg -devicequery wake_programmable
+    if(-not $allDevices){ Log 'No wake-programmable devices.'; return }
+    
     $idx = 0
-    # Reserve space for menu (from row 10) and log (last 7 rows)
-    $maxItems = $H - 10 - 7 - 2 # screen_height - menu_top - log_lines - buffer
-    if ($maxItems -lt 1) { $maxItems = 1 }
-
     while($true){
-        $armedList = powercfg -devicequery wake_armed
-        [Console]::SetCursorPosition(0,10)
-        ClearZone 10 ($H-8)
-
-        [Console]::SetCursorPosition(0,10)
-        C "Wake devices - A/Enter=toggle, B/Esc=back" DarkGray; NewLine
-
-        $displayList = $list
-        if ($list.Count -gt $maxItems) {
-            $displayList = $list[0..($maxItems-1)]
-        }
-
-        for($i=0; $i -lt $displayList.Count; $i++){
-            $isArmed = $armedList -contains $displayList[$i]
+        Clear-Host
+        C "==== MANAGE WAKE DEVICES ====" Cyan; NewLine
+        C "Use ↑↓, A/Enter=toggle, B/Esc=back" DarkGray; NewLine
+        $armedDevices = WakeList
+        for($i=0; $i -lt $allDevices.Count; $i++){
+            $isArmed = $armedDevices -contains $allDevices[$i]
             $flag = if($isArmed){'[ON] '}else{'[OFF]'}
-            
-            if($i -eq $idx){
-                Write-Host ("> $flag$($displayList[$i])".PadRight($W-1)) -ForegroundColor Black -BackgroundColor Yellow
-            }else{
-                Write-Host ("  $flag$($displayList[$i])".PadRight($W-1))
-            }
-        }
-        if ($list.Count -gt $maxItems) {
-            C '...list truncated (screen too small)' DarkGray
+            $line = "  $flag$($allDevices[$i])"
+            if($i -eq $idx){ Write-Host (">" + $line.SubString(1)) -ForegroundColor Black -BackgroundColor Yellow }
+            else { Write-Host $line }
         }
 
-        $maxIdx = $displayList.Count - 1
-        
         $k = [Console]::ReadKey($true).Key
-        $actionTaken = $false
-        if($k -eq 'UpArrow'){ if($idx -gt 0){$idx--} }
-        elseif($k -eq 'DownArrow'){ if($idx -lt $maxIdx){$idx++} }
-        elseif($k -eq 'A' -or $k -eq 'Enter'){
-            $dev = $displayList[$idx]
-            if($armedList -contains $dev){
-                if(Invoke-PoshCommand {powercfg -devicedisablewake "$dev"}){ Log "Disabled wake: $dev" }
-            } else {
-                if(Invoke-PoshCommand {powercfg -deviceenablewake "$dev"}){ Log "Enabled wake : $dev" }
+        switch($k){
+            'UpArrow'   { if($idx -gt 0){$idx--} }
+            'DownArrow' { if($idx -lt ($allDevices.Count - 1)){$idx++} }
+            'A'; 'Enter' { 
+                Toggle-WakeDevice -dev $allDevices[$idx] -isArmed ($armedDevices -contains $allDevices[$idx])
             }
-            $actionTaken = $true
+            'B'; 'Backspace'; 'Escape' { return }
         }
-        elseif($k -eq 'B' -or $k -eq 'Backspace' -or $k -eq 'Escape'){
-            return
-        }
-        
-        if($actionTaken){
-            $armedList = powercfg -devicequery wake_armed
-        }
-        DrawLog
     }
 }
 
-### ----- main loop -----
+### ----- MAIN LOOP -----
 $sel=0
 $menu = @(
-  'Show status',
+  'Refresh Status',
   'Disable Modern Standby',
   'Enable Hibernate',
   'Set Power-button -> Hibernate',
   'Manage wake devices',
   'EXIT'
 )
-$needsRedraw = $true
+
+Update-Status
 while($true){
-    if($needsRedraw){
-        DrawStatus; DrawMenu $sel $menu; DrawLog
-        $needsRedraw = $false
-    }
-
+    Draw-Screen $sel $menu
     $k = [Console]::ReadKey($true).Key
-    $oldSel = $sel
 
-    if($k -eq 'UpArrow'){ if($sel -gt 0){$sel--} }
-    elseif($k -eq 'DownArrow'){ if($sel -lt ($menu.Count-1)){$sel++} }
-    elseif($k -eq 'A' -or $k -eq 'Enter'){
-        $actionTaken = $false
-        switch($sel){
-            0 { Log 'Status refreshed'; $actionTaken = $true }
-            1 { if(DisableModern){ $actionTaken = $true } }
-            2 { if(EnableHib){ $actionTaken = $true } }
-            3 { if(SetPowerBtn){ $actionTaken = $true } }
-            4 { WakeMenu; $actionTaken = $true } # WakeMenu is blocking, so redraw after
-            5 { break }
+    switch($k){
+        'UpArrow'   { if($sel -gt 0){ $sel-- } }
+        'DownArrow' { if($sel -lt ($menu.Count-1)){ $sel++ } }
+        'A'; 'Enter' {
+            $refresh = $false
+            switch($sel){
+                0 { $refresh = $true }
+                1 { if(DisableModern){ $refresh = $true } }
+                2 { if(EnableHib){ $refresh = $true } }
+                3 { if(SetPowerBtn){ $refresh = $true } }
+                4 { Manage-WakeDevices; $refresh = $true }
+                5 { break }
+            }
+            if($sel -eq 5){ break }
+            if($refresh){ Update-Status }
         }
-        if($sel -eq 5){ break }
-        if($actionTaken){ $needsRedraw = $true }
-    }
-    elseif($k -eq 'B' -or $k -eq 'Backspace' -or $k -eq 'Escape'){
-        break
-    }
-
-    if($oldSel -ne $sel){
-        DrawMenu $sel $menu
+        'B'; 'Backspace'; 'Escape' { break }
     }
 }
-ClearZone 0 ($H-1)
+
+Clear-Host
 C "Done." Green; NewLine
 
