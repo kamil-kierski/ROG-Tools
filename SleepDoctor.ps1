@@ -35,10 +35,21 @@ function Log($msg){
     if($LOG.Count -gt 5){ $global:LOG = $LOG[-5..-1] }
 }
 
+function Invoke-PoshCommand {
+    param($command)
+    $output = & $command 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $errmsg = ($output | Out-String).Trim()
+        Log "ERROR: $errmsg"
+        return $false
+    }
+    return $true
+}
+
 ### ----- fix actions -----
-function DisableModern { Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' PlatformAoAcOverride 0 -Type DWord -Force; Log 'Modern Standby disabled'; }
-function EnableHib     { powercfg /hibernate on | Out-Null; Log 'Hibernate enabled'; }
-function SetPowerBtn   { powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setactive SCHEME_CURRENT; Log 'Power-button -> Hibernate'; }
+function DisableModern { if(Invoke-PoshCommand {powercfg -change -standby-timeout-ac 0; powercfg -change -standby-timeout-dc 0}) { Log 'Modern Standby disabled (timeouts set to 0)'; Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' PlatformAoAcOverride 0 -Type DWord -Force; Log 'Modern Standby disabled (registry)' } }
+function EnableHib     { if(Invoke-PoshCommand {powercfg /hibernate on}) { Log 'Hibernate enabled' } }
+function SetPowerBtn   { if(Invoke-PoshCommand {powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setactive SCHEME_CURRENT}) { Log 'Power-button -> Hibernate' } }
 
 ### ----- drawing helpers (minimal flicker) -----
 $H = [Console]::WindowHeight
@@ -127,23 +138,28 @@ function WakeMenu{
             C '...list truncated (screen too small)' DarkGray
         }
 
-        $k = [Console]::ReadKey($true).Key
         $maxIdx = $displayList.Count - 1
         
+        $k = [Console]::ReadKey($true).Key
+        $actionTaken = $false
         if($k -eq 'UpArrow'){ if($idx -gt 0){$idx--} }
         elseif($k -eq 'DownArrow'){ if($idx -lt $maxIdx){$idx++} }
         elseif($k -eq 'A' -or $k -eq 'Enter'){
             $dev = $displayList[$idx]
             if($armedList -contains $dev){
-                powercfg -devicedisablewake "$dev" | Out-Null; Log "Disabled wake: $dev"
+                if(Invoke-PoshCommand {powercfg -devicedisablewake "$dev"}){ Log "Disabled wake: $dev" }
             } else {
-                powercfg -deviceenablewake "$dev" | Out-Null; Log "Enabled wake : $dev"
+                if(Invoke-PoshCommand {powercfg -deviceenablewake "$dev"}){ Log "Enabled wake : $dev" }
             }
+            $actionTaken = $true
         }
         elseif($k -eq 'B' -or $k -eq 'Backspace' -or $k -eq 'Escape'){
             return
         }
         
+        if($actionTaken){
+            $armedList = powercfg -devicequery wake_armed
+        }
         DrawLog
     }
 }
@@ -158,25 +174,37 @@ $menu = @(
   'Manage wake devices',
   'EXIT'
 )
+$needsRedraw = $true
 while($true){
-    DrawStatus; DrawMenu $sel $menu; DrawLog
+    if($needsRedraw){
+        DrawStatus; DrawMenu $sel $menu; DrawLog
+        $needsRedraw = $false
+    }
+
     $k = [Console]::ReadKey($true).Key
+    $oldSel = $sel
 
     if($k -eq 'UpArrow'){ if($sel -gt 0){$sel--} }
     elseif($k -eq 'DownArrow'){ if($sel -lt ($menu.Count-1)){$sel++} }
     elseif($k -eq 'A' -or $k -eq 'Enter'){
+        $actionTaken = $false
         switch($sel){
-            0 { Log 'Status refreshed' }
-            1 { DisableModern }
-            2 { EnableHib }
-            3 { SetPowerBtn }
-            4 { WakeMenu }
+            0 { Log 'Status refreshed'; $actionTaken = $true }
+            1 { if(DisableModern){ $actionTaken = $true } }
+            2 { if(EnableHib){ $actionTaken = $true } }
+            3 { if(SetPowerBtn){ $actionTaken = $true } }
+            4 { WakeMenu; $actionTaken = $true } # WakeMenu is blocking, so redraw after
             5 { break }
         }
         if($sel -eq 5){ break }
+        if($actionTaken){ $needsRedraw = $true }
     }
     elseif($k -eq 'B' -or $k -eq 'Backspace' -or $k -eq 'Escape'){
         break
+    }
+
+    if($oldSel -ne $sel){
+        DrawMenu $sel $menu
     }
 }
 ClearZone 0 ($H-1)
