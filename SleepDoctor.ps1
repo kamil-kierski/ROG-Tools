@@ -1,5 +1,5 @@
 <#
-    ROG Ally Sleep Doctor - Enhanced Version (PowerShell 3.0+ Compatible)
+    ROG Ally Sleep Doctor - Enhanced Version with Fixes (PowerShell 3.0+ Compatible)
     Manages power settings, hibernation, and wake devices for optimal sleep performance
     
     Controls:
@@ -115,24 +115,41 @@ function Get-HibernationStatus {
 
 function Get-WakeDevices {
     try {
-        $devices = powercfg -devicequery wake_armed 2>$null
-        if ($devices) {
-            return @($devices | Where-Object { $_ -and $_.Trim() })
+        $output = powercfg -devicequery wake_armed 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Add-ActivityLog "Warning: powercfg wake_armed query failed"
+            return @()
+        }
+        
+        if ($output) {
+            # Filter out empty lines and trim whitespace
+            $devices = @($output | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() })
+            Add-ActivityLog "Found $($devices.Count) wake-armed devices"
+            return $devices
         }
         return @()
     } catch {
+        Add-ActivityLog "Error querying wake devices: $($_.Exception.Message)"
         return @()
     }
 }
 
 function Get-WakeProgrammableDevices {
     try {
-        $devices = powercfg -devicequery wake_programmable 2>$null
-        if ($devices) {
-            return @($devices | Where-Object { $_ -and $_.Trim() })
+        $output = powercfg -devicequery wake_programmable 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Add-ActivityLog "Warning: powercfg wake_programmable query failed"
+            return @()
+        }
+        
+        if ($output) {
+            # Filter out empty lines and trim whitespace
+            $devices = @($output | Where-Object { $_ -and $_.Trim() -ne "" } | ForEach-Object { $_.Trim() })
+            return $devices
         }
         return @()
     } catch {
+        Add-ActivityLog "Error querying wake programmable devices: $($_.Exception.Message)"
         return @()
     }
 }
@@ -140,7 +157,7 @@ function Get-WakeProgrammableDevices {
 function Get-LastWakeSource {
     try {
         $wakeInfo = powercfg /lastwake 2>$null
-        if ($wakeInfo) {
+        if ($LASTEXITCODE -eq 0 -and $wakeInfo) {
             return ($wakeInfo -join ' ').Trim()
         }
         return "Unknown"
@@ -151,9 +168,32 @@ function Get-LastWakeSource {
 
 function Get-PowerButtonAction {
     try {
+        # Get current active power scheme
+        $activeScheme = powercfg -getactivescheme 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Add-ActivityLog "Warning: Could not get active power scheme"
+            return @{ AC = "Unknown"; DC = "Unknown"; Status = "Inactive" }
+        }
+        
+        # Try multiple methods to get power button settings
         $queryResult = powercfg -q SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 2>$null
-        if (-not $queryResult) {
-            return @{ AC = "Unknown"; DC = "Unknown" }
+        
+        if ($LASTEXITCODE -ne 0 -or -not $queryResult) {
+            # Try alternative method with specific GUID
+            $queryResult = powercfg -q SUB_BUTTONS POWERBUTTONACTION 2>$null
+        }
+        
+        if ($LASTEXITCODE -ne 0 -or -not $queryResult) {
+            # Try with explicit current scheme GUID
+            if ($activeScheme -match '(\{[^}]+\})') {
+                $schemeGuid = $matches[1]
+                $queryResult = powercfg -q $schemeGuid SUB_BUTTONS POWERBUTTONACTION 2>$null
+            }
+        }
+        
+        if (-not $queryResult -or $LASTEXITCODE -ne 0) {
+            Add-ActivityLog "Warning: Could not query power button settings"
+            return @{ AC = "Unknown"; DC = "Unknown"; Status = "Inactive" }
         }
         
         $acAction = ""
@@ -178,12 +218,16 @@ function Get-PowerButtonAction {
         $acActionText = if ($actionMap.ContainsKey($acAction)) { $actionMap[$acAction] } else { "Unknown ($acAction)" }
         $dcActionText = if ($actionMap.ContainsKey($dcAction)) { $actionMap[$dcAction] } else { "Unknown ($dcAction)" }
         
+        $status = if ($acAction -and $dcAction) { "Active" } else { "Inactive" }
+        
         return @{
             AC = $acActionText
             DC = $dcActionText
+            Status = $status
         }
     } catch {
-        return @{ AC = "Unknown"; DC = "Unknown" }
+        Add-ActivityLog "Error getting power button action: $($_.Exception.Message)"
+        return @{ AC = "Unknown"; DC = "Unknown"; Status = "Error" }
     }
 }
 
@@ -218,7 +262,7 @@ function Enable-Hibernation {
             Add-ActivityLog "Hibernation enabled successfully"
             return $true
         } else {
-            Add-ActivityLog "Failed to enable hibernation"
+            Add-ActivityLog "Failed to enable hibernation (Exit code: $LASTEXITCODE)"
             return $false
         }
     } catch {
@@ -229,16 +273,43 @@ function Enable-Hibernation {
 
 function Set-PowerButtonToHibernate {
     try {
-        # Set power button action to hibernate (value 2) for both AC and DC
+        # Get current active scheme first
+        $activeScheme = powercfg -getactivescheme 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Add-ActivityLog "Warning: Could not determine active power scheme"
+        }
+        
+        # Try multiple approaches to set power button action
+        $success = $false
+        
+        # Method 1: Use SCHEME_CURRENT
         $result1 = powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 2 2>$null
         $result2 = powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 2 2>$null
-        $result3 = powercfg -setactive SCHEME_CURRENT 2>$null
         
         if ($LASTEXITCODE -eq 0) {
-            Add-ActivityLog "Power button configured for hibernation"
-            return $true
+            $success = $true
         } else {
-            Add-ActivityLog "Failed to configure power button"
+            # Method 2: Try without scheme specification
+            $result1 = powercfg -setacvalueindex SUB_BUTTONS POWERBUTTONACTION 2 2>$null
+            $result2 = powercfg -setdcvalueindex SUB_BUTTONS POWERBUTTONACTION 2 2>$null
+            
+            if ($LASTEXITCODE -eq 0) {
+                $success = $true
+            }
+        }
+        
+        # Apply the changes
+        if ($success) {
+            $result3 = powercfg -setactive SCHEME_CURRENT 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Add-ActivityLog "Power button configured for hibernation"
+                return $true
+            } else {
+                Add-ActivityLog "Power button settings updated but failed to activate scheme"
+                return $true  # Settings were applied, activation might not be critical
+            }
+        } else {
+            Add-ActivityLog "Failed to configure power button (Exit code: $LASTEXITCODE)"
             return $false
         }
     } catch {
@@ -254,7 +325,7 @@ function Show-Header {
     [Console]::SetCursorPosition(0, 0)
     
     Write-ColorText "================================================================================" $Colors.Header
-    Write-ColorText "                          ROG Ally Sleep Doctor                              " $Colors.Header
+    Write-ColorText "                          ROG Ally Sleep Doctor - FIXED                        " $Colors.Header
     Write-ColorText "================================================================================" $Colors.Header
 }
 
@@ -293,26 +364,40 @@ function Show-SystemStatus {
         Write-ColorText "(WARNING: Enable for better battery)" $Colors.Warning
     }
     
-    # Wake Devices
+    # Wake Devices (with improved counting)
     Write-ColorText "Wake Devices      : " $Colors.Info -NoNewline
-    if ($wakeDevices.Count -gt 0) {
-        Write-ColorText "$($wakeDevices.Count) active " $Colors.Warning -NoNewline
+    $deviceCount = if ($wakeDevices -is [array]) { $wakeDevices.Count } else { if ($wakeDevices) { 1 } else { 0 } }
+    if ($deviceCount -gt 0) {
+        Write-ColorText "$deviceCount active " $Colors.Warning -NoNewline
         Write-ColorText "(WARNING: May cause unwanted wake-ups)" $Colors.Warning
     } else {
         Write-ColorText "None active " $Colors.Success -NoNewline
         Write-ColorText "(OK: Prevents unwanted wake-ups)" $Colors.Success
     }
     
-    # Power Button Action
-    Write-ColorText "Power Button (AC) : " $Colors.Info -NoNewline
+    # Power Button Action (with status indicator)
+    Write-ColorText "Power Button      : " $Colors.Info -NoNewline
+    $statusColor = switch ($powerButton.Status) {
+        "Active" { $Colors.Success }
+        "Inactive" { $Colors.Warning }
+        default { $Colors.Error }
+    }
+    Write-ColorText $powerButton.Status $statusColor
+    
+    Write-ColorText "  ├─ AC Power     : " $Colors.Info -NoNewline
     if ($powerButton.AC -eq "Hibernate") {
         Write-ColorText $powerButton.AC $Colors.Success
+    } elseif ($powerButton.AC -eq "Unknown") {
+        Write-ColorText $powerButton.AC $Colors.Warning
     } else {
         Write-ColorText $powerButton.AC $Colors.Warning
     }
-    Write-ColorText "Power Button (DC) : " $Colors.Info -NoNewline
+    
+    Write-ColorText "  └─ Battery      : " $Colors.Info -NoNewline
     if ($powerButton.DC -eq "Hibernate") {
         Write-ColorText $powerButton.DC $Colors.Success
+    } elseif ($powerButton.DC -eq "Unknown") {
+        Write-ColorText $powerButton.DC $Colors.Warning
     } else {
         Write-ColorText $powerButton.DC $Colors.Warning
     }
@@ -325,7 +410,7 @@ function Show-SystemStatus {
     $score = 0
     if (-not $modernStandby) { $score += 25 }
     if ($hibernation) { $score += 25 }
-    if ($wakeDevices.Count -eq 0) { $score += 25 }
+    if ($deviceCount -eq 0) { $score += 25 }
     if ($powerButton.AC -eq "Hibernate" -and $powerButton.DC -eq "Hibernate") { $score += 25 }
     
     Write-ColorText ""
@@ -356,9 +441,9 @@ function Show-Menu {
         [int]$SelectedIndex
     )
     
-    [Console]::SetCursorPosition(0, 17)
-    Clear-ConsoleArea 17 25
-    [Console]::SetCursorPosition(0, 17)
+    [Console]::SetCursorPosition(0, 18)
+    Clear-ConsoleArea 18 26
+    [Console]::SetCursorPosition(0, 18)
     
     Write-ColorText "AVAILABLE ACTIONS" $Colors.Header
     Write-ColorText "--------------------------------------------------------------------------------" $Colors.Muted
@@ -397,7 +482,6 @@ function Show-ActivityLog {
 
 function Show-WakeDeviceManager {
     $devices = Get-WakeProgrammableDevices
-    $armedDevices = Get-WakeDevices
     
     if ($devices.Count -eq 0) {
         Add-ActivityLog "No wake-programmable devices found"
@@ -408,16 +492,17 @@ function Show-WakeDeviceManager {
     $maxDisplayItems = [Console]::WindowHeight - 20
     
     while ($true) {
-        # Refresh armed devices list
+        # Refresh armed devices list each iteration
         $armedDevices = Get-WakeDevices
         
-        [Console]::SetCursorPosition(0, 17)
-        Clear-ConsoleArea 17 ([Console]::WindowHeight - 8)
-        [Console]::SetCursorPosition(0, 17)
+        [Console]::SetCursorPosition(0, 18)
+        Clear-ConsoleArea 18 ([Console]::WindowHeight - 8)
+        [Console]::SetCursorPosition(0, 18)
         
         Write-ColorText "WAKE DEVICE MANAGER" $Colors.Header
         Write-ColorText "--------------------------------------------------------------------------------" $Colors.Muted
         Write-ColorText "Select devices to toggle their wake capability" $Colors.Info
+        Write-ColorText "Currently armed devices: $($armedDevices.Count)" $Colors.Info
         Write-ColorText ""
         
         $displayDevices = if ($devices.Count -gt $maxDisplayItems) { 
@@ -428,7 +513,15 @@ function Show-WakeDeviceManager {
         
         for ($i = 0; $i -lt $displayDevices.Count; $i++) {
             $device = $displayDevices[$i]
-            $isArmed = $armedDevices -contains $device
+            # More robust device matching
+            $isArmed = $false
+            foreach ($armedDevice in $armedDevices) {
+                if ($device.Trim() -eq $armedDevice.Trim()) {
+                    $isArmed = $true
+                    break
+                }
+            }
+            
             $status = if ($isArmed) { "[ENABLED]" } else { "[DISABLED]" }
             $statusColor = if ($isArmed) { $Colors.Warning } else { $Colors.Success }
             
@@ -461,51 +554,75 @@ function Show-WakeDeviceManager {
             }
             'Enter' {
                 $device = $displayDevices[$selectedIndex]
-                $isCurrentlyArmed = $armedDevices -contains $device
+                # Re-check if device is currently armed
+                $armedDevices = Get-WakeDevices()
+                $isCurrentlyArmed = $false
+                
+                foreach ($armedDevice in $armedDevices) {
+                    if ($device.Trim() -eq $armedDevice.Trim()) {
+                        $isCurrentlyArmed = $true
+                        break
+                    }
+                }
                 
                 try {
                     if ($isCurrentlyArmed) {
                         $result = powercfg -devicedisablewake "$device" 2>$null
                         if ($LASTEXITCODE -eq 0) {
-                            Add-ActivityLog "Disabled wake for: $($device.Split([Environment]::NewLine)[0])"
+                            Add-ActivityLog "Disabled wake for: $($device.Split([char]13)[0].Split([char]10)[0])"
                         } else {
-                            Add-ActivityLog "Failed to disable wake for device"
+                            Add-ActivityLog "Failed to disable wake for device (Exit: $LASTEXITCODE)"
                         }
                     } else {
                         $result = powercfg -deviceenablewake "$device" 2>$null
                         if ($LASTEXITCODE -eq 0) {
-                            Add-ActivityLog "Enabled wake for: $($device.Split([Environment]::NewLine)[0])"
+                            Add-ActivityLog "Enabled wake for: $($device.Split([char]13)[0].Split([char]10)[0])"
                         } else {
-                            Add-ActivityLog "Failed to enable wake for device"
+                            Add-ActivityLog "Failed to enable wake for device (Exit: $LASTEXITCODE)"
                         }
                     }
                 } catch {
                     Add-ActivityLog "Error toggling wake device: $($_.Exception.Message)"
                 }
+                
+                # Small delay to allow system to update
+                Start-Sleep -Milliseconds 500
             }
             'Spacebar' {
                 $device = $displayDevices[$selectedIndex]
-                $isCurrentlyArmed = $armedDevices -contains $device
+                # Re-check if device is currently armed
+                $armedDevices = Get-WakeDevices()
+                $isCurrentlyArmed = $false
+                
+                foreach ($armedDevice in $armedDevices) {
+                    if ($device.Trim() -eq $armedDevice.Trim()) {
+                        $isCurrentlyArmed = $true
+                        break
+                    }
+                }
                 
                 try {
                     if ($isCurrentlyArmed) {
                         $result = powercfg -devicedisablewake "$device" 2>$null
                         if ($LASTEXITCODE -eq 0) {
-                            Add-ActivityLog "Disabled wake for: $($device.Split([Environment]::NewLine)[0])"
+                            Add-ActivityLog "Disabled wake for: $($device.Split([char]13)[0].Split([char]10)[0])"
                         } else {
-                            Add-ActivityLog "Failed to disable wake for device"
+                            Add-ActivityLog "Failed to disable wake for device (Exit: $LASTEXITCODE)"
                         }
                     } else {
                         $result = powercfg -deviceenablewake "$device" 2>$null
                         if ($LASTEXITCODE -eq 0) {
-                            Add-ActivityLog "Enabled wake for: $($device.Split([Environment]::NewLine)[0])"
+                            Add-ActivityLog "Enabled wake for: $($device.Split([char]13)[0].Split([char]10)[0])"
                         } else {
-                            Add-ActivityLog "Failed to enable wake for device"
+                            Add-ActivityLog "Failed to enable wake for device (Exit: $LASTEXITCODE)"
                         }
                     }
                 } catch {
                     Add-ActivityLog "Error toggling wake device: $($_.Exception.Message)"
                 }
+                
+                # Small delay to allow system to update
+                Start-Sleep -Milliseconds 500
             }
             'Escape' {
                 return
@@ -554,6 +671,7 @@ function Invoke-AutoFix {
     
     if ($changes -gt 0) {
         Add-ActivityLog "Auto-fix completed with $changes changes"
+        Add-ActivityLog "Restart may be required for all changes to take effect"
     } else {
         Add-ActivityLog "No changes needed - system already optimized"
     }
@@ -565,7 +683,7 @@ function Start-SleepDoctor {
     [Console]::CursorVisible = $false
     Clear-Host
     
-    Add-ActivityLog "ROG Ally Sleep Doctor started"
+    Add-ActivityLog "ROG Ally Sleep Doctor (Fixed Version) started"
     
     $menuItems = @(
         "Refresh Status",
@@ -574,6 +692,7 @@ function Start-SleepDoctor {
         "Enable Hibernation", 
         "Set Power Button -> Hibernate",
         "Manage Wake Devices",
+        "Debug: Show Raw Power Data",
         "Exit"
     )
     
@@ -605,47 +724,6 @@ function Start-SleepDoctor {
                 }
             }
             'Enter' {
-                switch ($selectedIndex) {
-                    0 { # Refresh Status
-                        Add-ActivityLog "Status refreshed"
-                        $needsRedraw = $true
-                    }
-                    1 { # Auto-Fix
-                        Invoke-AutoFix
-                        $needsRedraw = $true
-                    }
-                    2 { # Disable Modern Standby
-                        if (Get-ModernStandbyStatus) {
-                            [void](Disable-ModernStandby)
-                        } else {
-                            Add-ActivityLog "Modern Standby is already disabled"
-                        }
-                        $needsRedraw = $true
-                    }
-                    3 { # Enable Hibernation
-                        if (-not (Get-HibernationStatus)) {
-                            [void](Enable-Hibernation)
-                        } else {
-                            Add-ActivityLog "Hibernation is already enabled"
-                        }
-                        $needsRedraw = $true
-                    }
-                    4 { # Set Power Button
-                        [void](Set-PowerButtonToHibernate)
-                        $needsRedraw = $true
-                    }
-                    5 { # Wake Device Manager
-                        Show-WakeDeviceManager
-                        $needsRedraw = $true
-                    }
-                    6 { # Exit
-                        break
-                    }
-                }
-                
-                if ($selectedIndex -eq 6) { break }
-            }
-            'Spacebar' {
                 switch ($selectedIndex) {
                     0 { # Refresh Status
                         Add-ActivityLog "Status refreshed"
