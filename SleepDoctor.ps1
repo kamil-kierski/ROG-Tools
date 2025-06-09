@@ -25,7 +25,7 @@ if (-not ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdent
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 
 # Global variables
-$Global:ActivityLog = [System.Collections.Generic.Queue[string]]::new()
+$Global:ActivityLog = New-Object System.Collections.Generic.Queue[string]
 $Global:MaxLogEntries = 10
 $Global:LastRefresh = Get-Date
 
@@ -69,7 +69,7 @@ function Add-ActivityLog {
     $Global:ActivityLog.Enqueue($logEntry)
     
     while ($Global:ActivityLog.Count -gt $Global:MaxLogEntries) {
-        $Global:ActivityLog.Dequeue() | Out-Null
+        [void]$Global:ActivityLog.Dequeue()
     }
 }
 
@@ -156,8 +156,8 @@ function Get-PowerButtonAction {
             '0x00000003' = 'Shut Down'
         }
         
-        $acActionText = $actionMap[$acAction] ?? "Unknown ($acAction)"
-        $dcActionText = $actionMap[$dcAction] ?? "Unknown ($dcAction)"
+        $acActionText = if ($actionMap.ContainsKey($acAction)) { $actionMap[$acAction] } else { "Unknown ($acAction)" }
+        $dcActionText = if ($actionMap.ContainsKey($dcAction)) { $actionMap[$dcAction] } else { "Unknown ($dcAction)" }
         
         return @{
             AC = $acActionText
@@ -307,9 +307,9 @@ function Show-SystemStatus {
     Write-ColorText "$score/100 " $scoreColor -NoNewline
     
     $healthText = switch ($score) {
-        { $_ -ge 75 } { "Excellent" }
-        { $_ -ge 50 } { "Good" }
-        { $_ -ge 25 } { "Needs Improvement" }
+        { $_ -ge 75 } { "Excellent"; break }
+        { $_ -ge 50 } { "Good"; break }
+        { $_ -ge 25 } { "Needs Improvement"; break }
         default { "Poor" }
     }
     Write-ColorText "($healthText)" $scoreColor
@@ -426,7 +426,7 @@ function Show-WakeDeviceManager {
             'DownArrow' {
                 if ($selectedIndex -lt ($displayDevices.Count - 1)) { $selectedIndex++ }
             }
-            { $_ -in 'Enter', 'Spacebar' } {
+            { $_ -in @('Enter', 'Spacebar') } {
                 $device = $displayDevices[$selectedIndex]
                 $isCurrentlyArmed = $armedDevices -contains $device
                 
@@ -450,7 +450,7 @@ function Show-WakeDeviceManager {
                     Add-ActivityLog "Error toggling wake device: $($_.Exception.Message)"
                 }
             }
-            { $_ -in 'Escape', 'B' } {
+            { $_ -in @('Escape', 'B') } {
                 return
             }
         }
@@ -544,7 +544,7 @@ function Start-SleepDoctor {
                     Show-Menu $menuItems $selectedIndex
                 }
             }
-            { $_ -in 'Enter', 'Spacebar' } {
+            { $_ -in @('Enter', 'Spacebar') } {
                 switch ($selectedIndex) {
                     0 { # Refresh Status
                         Add-ActivityLog "Status refreshed"
@@ -589,7 +589,7 @@ function Start-SleepDoctor {
                 Add-ActivityLog "Manual refresh requested"
                 $needsRedraw = $true
             }
-            { $_ -in 'Q', 'Escape' } {
+            { $_ -in @('Q', 'Escape') } {
                 break
             }
         }
