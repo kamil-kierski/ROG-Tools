@@ -9,7 +9,9 @@
 if (-not ([Security.Principal.WindowsPrincipal](
         [Security.Principal.WindowsIdentity]::GetCurrent())
     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    $script_url = 'https://raw.githubusercontent.com/kamil-kierski/ROG-Tools/master/SleepDoctor.ps1'
+    $command = "Set-ExecutionPolicy -Scope Process Bypass -Force; iwr -UseBasicParsing {0} | iex" -f $script_url
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -Command `"$command`""
     exit
 }
 Set-ExecutionPolicy Bypass -Scope Process -Force
@@ -36,7 +38,7 @@ function Log($msg){
 ### ----- fix actions -----
 function DisableModern { Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' PlatformAoAcOverride 0 -Type DWord -Force; Log 'Modern Standby disabled'; }
 function EnableHib     { powercfg /hibernate on | Out-Null; Log 'Hibernate enabled'; }
-function SetPowerBtn   { powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setactive SCHEME_CURRENT; Log 'Power-button → Hibernate'; }
+function SetPowerBtn   { powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 3; powercfg -setactive SCHEME_CURRENT; Log 'Power-button -> Hibernate'; }
 
 ### ----- drawing helpers (minimal flicker) -----
 $H = [Console]::WindowHeight
@@ -104,7 +106,7 @@ function WakeMenu{
         ClearZone 10 ($H-8)
 
         [Console]::SetCursorPosition(0,10)
-        C "Wake devices – A/Enter=toggle, B/Esc=back" DarkGray; NewLine
+        C "Wake devices - A/Enter=toggle, B/Esc=back" DarkGray; NewLine
 
         $displayList = $list
         if ($list.Count -gt $maxItems) {
@@ -152,7 +154,7 @@ $menu = @(
   'Show status',
   'Disable Modern Standby',
   'Enable Hibernate',
-  'Set Power-button → Hibernate',
+  'Set Power-button -> Hibernate',
   'Manage wake devices',
   'EXIT'
 )
