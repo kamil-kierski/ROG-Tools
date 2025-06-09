@@ -127,22 +127,21 @@ function WakeMenu{
 
         $k = [Console]::ReadKey($true).Key
         $maxIdx = $displayList.Count - 1
-        switch($k){
-            'UpArrow'   { if($idx -gt 0){$idx--} }
-            'DownArrow' { if($idx -lt $maxIdx){$idx++} }
-            'A'
-            'Enter' {
-                $dev = $displayList[$idx]
-                if($armedList -contains $dev){
-                    powercfg -devicedisablewake "$dev" | Out-Null; Log "Disabled wake: $dev"
-                } else {
-                    powercfg -deviceenablewake "$dev" | Out-Null; Log "Enabled wake : $dev"
-                }
+        
+        if($k -eq 'UpArrow'){ if($idx -gt 0){$idx--} }
+        elseif($k -eq 'DownArrow'){ if($idx -lt $maxIdx){$idx++} }
+        elseif($k -eq 'A' -or $k -eq 'Enter'){
+            $dev = $displayList[$idx]
+            if($armedList -contains $dev){
+                powercfg -devicedisablewake "$dev" | Out-Null; Log "Disabled wake: $dev"
+            } else {
+                powercfg -deviceenablewake "$dev" | Out-Null; Log "Enabled wake : $dev"
             }
-            'B'
-            'Backspace'
-            'Escape' { return }
         }
+        elseif($k -eq 'B' -or $k -eq 'Backspace' -or $k -eq 'Escape'){
+            return
+        }
+        
         DrawLog
     }
 }
@@ -160,23 +159,22 @@ $menu = @(
 while($true){
     DrawStatus; DrawMenu $sel $menu; DrawLog
     $k = [Console]::ReadKey($true).Key
-    switch($k){
-        'UpArrow'   { if($sel -gt 0){$sel--} }
-        'DownArrow' { if($sel -lt ($menu.Count-1)){$sel++} }
-        'A'
-        'Enter' {
-            switch($sel){
-                0 { Log 'Status refreshed' }
-                1 { DisableModern }
-                2 { EnableHib }
-                3 { SetPowerBtn }
-                4 { WakeMenu }
-                5 { break }
-            }
+
+    if($k -eq 'UpArrow'){ if($sel -gt 0){$sel--} }
+    elseif($k -eq 'DownArrow'){ if($sel -lt ($menu.Count-1)){$sel++} }
+    elseif($k -eq 'A' -or $k -eq 'Enter'){
+        switch($sel){
+            0 { Log 'Status refreshed' }
+            1 { DisableModern }
+            2 { EnableHib }
+            3 { SetPowerBtn }
+            4 { WakeMenu }
+            5 { break }
         }
-        'B'
-        'Backspace'
-        'Escape' { break }
+        if($sel -eq 5){ break }
+    }
+    elseif($k -eq 'B' -or $k -eq 'Backspace' -or $k -eq 'Escape'){
+        break
     }
 }
 ClearZone 0 ($H-1)
