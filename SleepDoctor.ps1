@@ -1,5 +1,5 @@
 <#
-    ROG Ally Sleep Doctor - Enhanced Version
+    ROG Ally Sleep Doctor - Enhanced Version (PowerShell 3.0+ Compatible)
     Manages power settings, hibernation, and wake devices for optimal sleep performance
     
     Controls:
@@ -8,8 +8,6 @@
     • Escape/Q: Exit
     • R: Refresh status
 #>
-
-#Requires -RunAsAdministrator
 
 # Ensure we're running as administrator
 if (-not ([Security.Principal.WindowsPrincipal]([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -56,7 +54,11 @@ function Write-ColorText {
             Write-Host $Text -ForegroundColor $Color
         }
     } catch {
-        Write-Host $Text -NoNewline:$NoNewline
+        if ($NoNewline) {
+            Write-Host $Text -NoNewline
+        } else {
+            Write-Host $Text
+        }
     }
 }
 
@@ -101,8 +103,11 @@ function Get-ModernStandbyStatus {
 
 function Get-HibernationStatus {
     try {
-        $hibernateEnabled = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name 'HibernateEnabled' -ErrorAction SilentlyContinue
-        return $hibernateEnabled -eq 1
+        $hibernateEnabled = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name 'HibernateEnabled' -ErrorAction SilentlyContinue
+        if ($hibernateEnabled -and $hibernateEnabled.HibernateEnabled) {
+            return $hibernateEnabled.HibernateEnabled -eq 1
+        }
+        return $false
     } catch {
         return $false
     }
@@ -146,8 +151,22 @@ function Get-LastWakeSource {
 
 function Get-PowerButtonAction {
     try {
-        $acAction = powercfg -q SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION | Select-String "Current AC Power Setting Index:" | ForEach-Object { $_.Line.Split(':')[1].Trim() }
-        $dcAction = powercfg -q SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION | Select-String "Current DC Power Setting Index:" | ForEach-Object { $_.Line.Split(':')[1].Trim() }
+        $queryResult = powercfg -q SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 2>$null
+        if (-not $queryResult) {
+            return @{ AC = "Unknown"; DC = "Unknown" }
+        }
+        
+        $acAction = ""
+        $dcAction = ""
+        
+        foreach ($line in $queryResult) {
+            if ($line -match "Current AC Power Setting Index:\s*(.+)") {
+                $acAction = $matches[1].Trim()
+            }
+            if ($line -match "Current DC Power Setting Index:\s*(.+)") {
+                $dcAction = $matches[1].Trim()
+            }
+        }
         
         $actionMap = @{
             '0x00000000' = 'Do Nothing'
@@ -210,7 +229,7 @@ function Enable-Hibernation {
 
 function Set-PowerButtonToHibernate {
     try {
-        # Set power button action to hibernate (value 3) for both AC and DC
+        # Set power button action to hibernate (value 2) for both AC and DC
         $result1 = powercfg -setacvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 2 2>$null
         $result2 = powercfg -setdcvalueindex SCHEME_CURRENT SUB_BUTTONS POWERBUTTONACTION 2 2>$null
         $result3 = powercfg -setactive SCHEME_CURRENT 2>$null
@@ -234,9 +253,9 @@ function Show-Header {
     Clear-ConsoleArea 0 2
     [Console]::SetCursorPosition(0, 0)
     
-    Write-ColorText "╔══════════════════════════════════════════════════════════════════════════════╗" $Colors.Header
-    Write-ColorText "║                          ROG Ally Sleep Doctor                              ║" $Colors.Header
-    Write-ColorText "╚══════════════════════════════════════════════════════════════════════════════╝" $Colors.Header
+    Write-ColorText "================================================================================" $Colors.Header
+    Write-ColorText "                          ROG Ally Sleep Doctor                              " $Colors.Header
+    Write-ColorText "================================================================================" $Colors.Header
 }
 
 function Show-SystemStatus {
@@ -245,7 +264,7 @@ function Show-SystemStatus {
     [Console]::SetCursorPosition(0, 4)
     
     Write-ColorText "CURRENT SYSTEM STATUS" $Colors.Header
-    Write-ColorText "────────────────────────────────────────────────────────────────────────────────" $Colors.Muted
+    Write-ColorText "--------------------------------------------------------------------------------" $Colors.Muted
     
     # Get current status
     $modernStandby = Get-ModernStandbyStatus
@@ -258,37 +277,45 @@ function Show-SystemStatus {
     Write-ColorText "Modern Standby    : " $Colors.Info -NoNewline
     if ($modernStandby) {
         Write-ColorText "ENABLED " $Colors.Error -NoNewline
-        Write-ColorText "(⚠️  May cause battery drain)" $Colors.Warning
+        Write-ColorText "(WARNING: May cause battery drain)" $Colors.Warning
     } else {
         Write-ColorText "DISABLED " $Colors.Success -NoNewline
-        Write-ColorText "(✓ Recommended)" $Colors.Success
+        Write-ColorText "(OK: Recommended)" $Colors.Success
     }
     
     # Hibernation Status
     Write-ColorText "Hibernation       : " $Colors.Info -NoNewline
     if ($hibernation) {
         Write-ColorText "ENABLED " $Colors.Success -NoNewline
-        Write-ColorText "(✓ Good for battery life)" $Colors.Success
+        Write-ColorText "(OK: Good for battery life)" $Colors.Success
     } else {
         Write-ColorText "DISABLED " $Colors.Error -NoNewline
-        Write-ColorText "(⚠️  Enable for better battery)" $Colors.Warning
+        Write-ColorText "(WARNING: Enable for better battery)" $Colors.Warning
     }
     
     # Wake Devices
     Write-ColorText "Wake Devices      : " $Colors.Info -NoNewline
     if ($wakeDevices.Count -gt 0) {
         Write-ColorText "$($wakeDevices.Count) active " $Colors.Warning -NoNewline
-        Write-ColorText "(⚠️  May cause unwanted wake-ups)" $Colors.Warning
+        Write-ColorText "(WARNING: May cause unwanted wake-ups)" $Colors.Warning
     } else {
         Write-ColorText "None active " $Colors.Success -NoNewline
-        Write-ColorText "(✓ Prevents unwanted wake-ups)" $Colors.Success
+        Write-ColorText "(OK: Prevents unwanted wake-ups)" $Colors.Success
     }
     
     # Power Button Action
     Write-ColorText "Power Button (AC) : " $Colors.Info -NoNewline
-    Write-ColorText $powerButton.AC $(if ($powerButton.AC -eq "Hibernate") { $Colors.Success } else { $Colors.Warning })
+    if ($powerButton.AC -eq "Hibernate") {
+        Write-ColorText $powerButton.AC $Colors.Success
+    } else {
+        Write-ColorText $powerButton.AC $Colors.Warning
+    }
     Write-ColorText "Power Button (DC) : " $Colors.Info -NoNewline
-    Write-ColorText $powerButton.DC $(if ($powerButton.DC -eq "Hibernate") { $Colors.Success } else { $Colors.Warning })
+    if ($powerButton.DC -eq "Hibernate") {
+        Write-ColorText $powerButton.DC $Colors.Success
+    } else {
+        Write-ColorText $powerButton.DC $Colors.Warning
+    }
     
     # Last Wake Source
     Write-ColorText "Last Wake Source  : " $Colors.Info -NoNewline
@@ -303,15 +330,21 @@ function Show-SystemStatus {
     
     Write-ColorText ""
     Write-ColorText "Sleep Health Score: " $Colors.Info -NoNewline
-    $scoreColor = if ($score -ge 75) { $Colors.Success } elseif ($score -ge 50) { $Colors.Warning } else { $Colors.Error }
-    Write-ColorText "$score/100 " $scoreColor -NoNewline
-    
-    $healthText = switch ($score) {
-        { $_ -ge 75 } { "Excellent"; break }
-        { $_ -ge 50 } { "Good"; break }
-        { $_ -ge 25 } { "Needs Improvement"; break }
-        default { "Poor" }
+    if ($score -ge 75) {
+        $scoreColor = $Colors.Success
+        $healthText = "Excellent"
+    } elseif ($score -ge 50) {
+        $scoreColor = $Colors.Warning
+        $healthText = "Good"
+    } elseif ($score -ge 25) {
+        $scoreColor = $Colors.Warning
+        $healthText = "Needs Improvement"
+    } else {
+        $scoreColor = $Colors.Error
+        $healthText = "Poor"
     }
+    
+    Write-ColorText "$score/100 " $scoreColor -NoNewline
     Write-ColorText "($healthText)" $scoreColor
     
     $Global:LastRefresh = Get-Date
@@ -328,18 +361,18 @@ function Show-Menu {
     [Console]::SetCursorPosition(0, 17)
     
     Write-ColorText "AVAILABLE ACTIONS" $Colors.Header
-    Write-ColorText "────────────────────────────────────────────────────────────────────────────────" $Colors.Muted
+    Write-ColorText "--------------------------------------------------------------------------------" $Colors.Muted
     
     for ($i = 0; $i -lt $MenuItems.Count; $i++) {
         if ($i -eq $SelectedIndex) {
-            Write-Host ("  ► " + $MenuItems[$i]).PadRight([Console]::WindowWidth - 1) -ForegroundColor $Colors.Selected.Foreground -BackgroundColor $Colors.Selected.Background
+            Write-Host ("  > " + $MenuItems[$i]).PadRight([Console]::WindowWidth - 1) -ForegroundColor $Colors.Selected.Foreground -BackgroundColor $Colors.Selected.Background
         } else {
             Write-ColorText "    $($MenuItems[$i])" $Colors.Info
         }
     }
     
     Write-ColorText ""
-    Write-ColorText "Controls: ↑↓ Navigate • Enter/Space Select • R Refresh • Q/Esc Exit" $Colors.Muted
+    Write-ColorText "Controls: Up/Down Navigate • Enter/Space Select • R Refresh • Q/Esc Exit" $Colors.Muted
 }
 
 function Show-ActivityLog {
@@ -349,7 +382,7 @@ function Show-ActivityLog {
     [Console]::SetCursorPosition(0, $logStartLine)
     
     Write-ColorText "ACTIVITY LOG" $Colors.Header
-    Write-ColorText "────────────────────────────────────────────────────────────────────────────────" $Colors.Muted
+    Write-ColorText "--------------------------------------------------------------------------------" $Colors.Muted
     
     if ($Global:ActivityLog.Count -eq 0) {
         Write-ColorText "No recent activity" $Colors.Muted
@@ -383,7 +416,7 @@ function Show-WakeDeviceManager {
         [Console]::SetCursorPosition(0, 17)
         
         Write-ColorText "WAKE DEVICE MANAGER" $Colors.Header
-        Write-ColorText "────────────────────────────────────────────────────────────────────────────────" $Colors.Muted
+        Write-ColorText "--------------------------------------------------------------------------------" $Colors.Muted
         Write-ColorText "Select devices to toggle their wake capability" $Colors.Info
         Write-ColorText ""
         
@@ -400,7 +433,7 @@ function Show-WakeDeviceManager {
             $statusColor = if ($isArmed) { $Colors.Warning } else { $Colors.Success }
             
             if ($i -eq $selectedIndex) {
-                Write-Host ("  ► $status $device").PadRight([Console]::WindowWidth - 1) -ForegroundColor $Colors.Selected.Foreground -BackgroundColor $Colors.Selected.Background
+                Write-Host ("  > $status $device").PadRight([Console]::WindowWidth - 1) -ForegroundColor $Colors.Selected.Foreground -BackgroundColor $Colors.Selected.Background
             } else {
                 Write-ColorText "    " $Colors.Info -NoNewline
                 Write-ColorText $status $statusColor -NoNewline
@@ -413,7 +446,7 @@ function Show-WakeDeviceManager {
         }
         
         Write-ColorText ""
-        Write-ColorText "Controls: ↑↓ Navigate • Enter/Space Toggle • Esc/B Back" $Colors.Muted
+        Write-ColorText "Controls: Up/Down Navigate • Enter/Space Toggle • Esc/B Back" $Colors.Muted
         
         Show-ActivityLog
         
@@ -426,7 +459,7 @@ function Show-WakeDeviceManager {
             'DownArrow' {
                 if ($selectedIndex -lt ($displayDevices.Count - 1)) { $selectedIndex++ }
             }
-            { $_ -in @('Enter', 'Spacebar') } {
+            'Enter' {
                 $device = $displayDevices[$selectedIndex]
                 $isCurrentlyArmed = $armedDevices -contains $device
                 
@@ -450,7 +483,34 @@ function Show-WakeDeviceManager {
                     Add-ActivityLog "Error toggling wake device: $($_.Exception.Message)"
                 }
             }
-            { $_ -in @('Escape', 'B') } {
+            'Spacebar' {
+                $device = $displayDevices[$selectedIndex]
+                $isCurrentlyArmed = $armedDevices -contains $device
+                
+                try {
+                    if ($isCurrentlyArmed) {
+                        $result = powercfg -devicedisablewake "$device" 2>$null
+                        if ($LASTEXITCODE -eq 0) {
+                            Add-ActivityLog "Disabled wake for: $($device.Split([Environment]::NewLine)[0])"
+                        } else {
+                            Add-ActivityLog "Failed to disable wake for device"
+                        }
+                    } else {
+                        $result = powercfg -deviceenablewake "$device" 2>$null
+                        if ($LASTEXITCODE -eq 0) {
+                            Add-ActivityLog "Enabled wake for: $($device.Split([Environment]::NewLine)[0])"
+                        } else {
+                            Add-ActivityLog "Failed to enable wake for device"
+                        }
+                    }
+                } catch {
+                    Add-ActivityLog "Error toggling wake device: $($_.Exception.Message)"
+                }
+            }
+            'Escape' {
+                return
+            }
+            'B' {
                 return
             }
         }
@@ -508,13 +568,13 @@ function Start-SleepDoctor {
     Add-ActivityLog "ROG Ally Sleep Doctor started"
     
     $menuItems = @(
-        "🔄 Refresh Status",
-        "⚡ Auto-Fix All Issues",
-        "🚫 Disable Modern Standby",
-        "💤 Enable Hibernation", 
-        "🔘 Set Power Button → Hibernate",
-        "📱 Manage Wake Devices",
-        "❌ Exit"
+        "Refresh Status",
+        "Auto-Fix All Issues",
+        "Disable Modern Standby",
+        "Enable Hibernation", 
+        "Set Power Button -> Hibernate",
+        "Manage Wake Devices",
+        "Exit"
     )
     
     $selectedIndex = 0
@@ -544,7 +604,7 @@ function Start-SleepDoctor {
                     Show-Menu $menuItems $selectedIndex
                 }
             }
-            { $_ -in @('Enter', 'Spacebar') } {
+            'Enter' {
                 switch ($selectedIndex) {
                     0 { # Refresh Status
                         Add-ActivityLog "Status refreshed"
@@ -556,7 +616,7 @@ function Start-SleepDoctor {
                     }
                     2 { # Disable Modern Standby
                         if (Get-ModernStandbyStatus) {
-                            Disable-ModernStandby | Out-Null
+                            [void](Disable-ModernStandby)
                         } else {
                             Add-ActivityLog "Modern Standby is already disabled"
                         }
@@ -564,14 +624,55 @@ function Start-SleepDoctor {
                     }
                     3 { # Enable Hibernation
                         if (-not (Get-HibernationStatus)) {
-                            Enable-Hibernation | Out-Null
+                            [void](Enable-Hibernation)
                         } else {
                             Add-ActivityLog "Hibernation is already enabled"
                         }
                         $needsRedraw = $true
                     }
                     4 { # Set Power Button
-                        Set-PowerButtonToHibernate | Out-Null
+                        [void](Set-PowerButtonToHibernate)
+                        $needsRedraw = $true
+                    }
+                    5 { # Wake Device Manager
+                        Show-WakeDeviceManager
+                        $needsRedraw = $true
+                    }
+                    6 { # Exit
+                        break
+                    }
+                }
+                
+                if ($selectedIndex -eq 6) { break }
+            }
+            'Spacebar' {
+                switch ($selectedIndex) {
+                    0 { # Refresh Status
+                        Add-ActivityLog "Status refreshed"
+                        $needsRedraw = $true
+                    }
+                    1 { # Auto-Fix
+                        Invoke-AutoFix
+                        $needsRedraw = $true
+                    }
+                    2 { # Disable Modern Standby
+                        if (Get-ModernStandbyStatus) {
+                            [void](Disable-ModernStandby)
+                        } else {
+                            Add-ActivityLog "Modern Standby is already disabled"
+                        }
+                        $needsRedraw = $true
+                    }
+                    3 { # Enable Hibernation
+                        if (-not (Get-HibernationStatus)) {
+                            [void](Enable-Hibernation)
+                        } else {
+                            Add-ActivityLog "Hibernation is already enabled"
+                        }
+                        $needsRedraw = $true
+                    }
+                    4 { # Set Power Button
+                        [void](Set-PowerButtonToHibernate)
                         $needsRedraw = $true
                     }
                     5 { # Wake Device Manager
@@ -589,7 +690,10 @@ function Start-SleepDoctor {
                 Add-ActivityLog "Manual refresh requested"
                 $needsRedraw = $true
             }
-            { $_ -in @('Q', 'Escape') } {
+            'Q' {
+                break
+            }
+            'Escape' {
                 break
             }
         }
